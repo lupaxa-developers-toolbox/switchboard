@@ -143,6 +143,7 @@ async def test_an_unstructured_profile_does_not_transcode(tmp_path: Path) -> Non
         received.append(line)
         writer.write(line)
         await writer.drain()
+        writer.close()
 
     server = await asyncio.start_server(echo, "127.0.0.1", 0)
     names = server.sockets

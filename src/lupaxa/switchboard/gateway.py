@@ -233,14 +233,13 @@ class Gateway:
         if self._control is not None:
             await self._control.close()
             self._control = None
+        servers: list[asyncio.AbstractServer] = []
         for runtime in self.bridges.values():
             if runtime.server is not None:
                 runtime.server.close()
-                await runtime.server.wait_closed()
+                servers.append(runtime.server)
             if runtime.udp is not None:
                 runtime.udp.close()
-            if runtime.runner is not None:
-                await runtime.runner.cleanup()
         for writer in list(self._writers):
             _close_writer(writer)
         for transport in list(self._transports):
@@ -254,7 +253,15 @@ class Gateway:
                 task.cancel()
             if pending:
                 await asyncio.gather(*pending, return_exceptions=True)
+        timeout = self.config.server.shutdown_timeout_seconds
+        for server in servers:
+            try:
+                await asyncio.wait_for(server.wait_closed(), timeout)
+            except TimeoutError:
+                logger.warning("a listener did not finish closing")
         for runtime in self.bridges.values():
+            if runtime.runner is not None:
+                await runtime.runner.cleanup()
             if runtime.client is not None and not runtime.client.closed:
                 await runtime.client.close()
 
@@ -2501,9 +2508,14 @@ def _nodelay(writer: asyncio.StreamWriter) -> None:
 
 
 def _close_writer(writer: asyncio.StreamWriter) -> None:
-    if writer.is_closing():
+    transport = writer.transport
+    if transport is None:
         return
-    writer.close()
+    if not transport.is_closing():
+        transport.close()
+    # Python 3.12 leaves a gracefully closed socket open until the peer
+    # closes too. Abort so shutdown is not stuck on that peer.
+    transport.abort()
 
 
 def _peer_addr(addr: tuple[str | int, ...] | None) -> tuple[str, int]:
