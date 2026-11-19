@@ -1,0 +1,19 @@
+version: 1
+bridges:
+  - name: events
+    mode: gateway
+    http:
+      response: forwarded
+      response_status: 202
+    input:
+      protocol: http
+      host: 127.0.0.1
+      port: 18081
+      path: /events
+      method: POST
+    output:
+      protocol: tcp
+      host: 127.0.0.1
+      port: 19011
+      framing:
+        type: newline

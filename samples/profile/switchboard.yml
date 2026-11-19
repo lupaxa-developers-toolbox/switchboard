@@ -1,0 +1,18 @@
+version: 1
+profiles:
+  device:
+    transport: tcp
+    framing:
+      type: length_prefix
+      prefix_bytes: 2
+      endian: big
+    structure:
+      endian: big
+      fields:
+        - name: kind
+          type: uint8
+        - name: note
+          type: string
+          length: 4
+        - name: rest
+          type: remaining_bytes

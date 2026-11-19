@@ -1,0 +1,16 @@
+version: 1
+bridges:
+  - name: line
+    mode: gateway
+    input:
+      protocol: tcp
+      host: 127.0.0.1
+      port: 19000
+      framing:
+        type: newline
+    output:
+      protocol: tcp
+      host: 127.0.0.1
+      port: 19001
+      framing:
+        type: newline
