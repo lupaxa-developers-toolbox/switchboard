@@ -1022,7 +1022,7 @@ class Gateway:
             return _Peer(
                 addr,
                 send_fn=lambda data: self._udp_http(runtime, addr, data),
-                close_fn=lambda: None,
+                close_fn=self._close_idle,
             )
         protocol = _QueueProtocol(4, lambda _size: self._drop(runtime))
         transport, _protocol = await asyncio.wait_for(
@@ -1168,7 +1168,7 @@ class Gateway:
             raise FrameError("The frame exceeds the size limit.", code="FRAME_TOO_LARGE")
         await socket_out.send_bytes(body)
 
-    def _forward_udp(
+    async def _forward_udp(
         self,
         runtime: BridgeRuntime,
         transport: asyncio.DatagramTransport,
@@ -2364,13 +2364,16 @@ class Gateway:
     def _drop(self, runtime: BridgeRuntime) -> None:
         runtime.dropped += 1
 
-    def _drop_writer(self, writer: asyncio.StreamWriter) -> None:
+    async def _drop_writer(self, writer: asyncio.StreamWriter) -> None:
         _close_writer(writer)
         self._writers.discard(writer)
 
-    def _drop_transport(self, transport: asyncio.BaseTransport) -> None:
+    async def _drop_transport(self, transport: asyncio.BaseTransport) -> None:
         transport.close()
         self._transports.discard(transport)
+
+    async def _close_idle(self) -> None:
+        return None
 
     def _spawn(self, coro: object, runtime: BridgeRuntime | None = None) -> None:
         task: asyncio.Task[None] = asyncio.create_task(coro)  # type: ignore[arg-type]
@@ -2386,19 +2389,15 @@ class _Peer:
     """One UDP client and the output connection kept for its replies."""
 
     addr: tuple[str, int]
-    send_fn: Callable[[bytes], object]
-    close_fn: Callable[[], object]
+    send_fn: Callable[[bytes], Awaitable[None]]
+    close_fn: Callable[[], Awaitable[object]]
     last_activity: float = field(default_factory=time.monotonic)
 
     async def deliver(self, data: bytes) -> None:
-        outcome = self.send_fn(data)
-        if isinstance(outcome, Awaitable):
-            await outcome
+        await self.send_fn(data)
 
     async def shutdown(self) -> None:
-        outcome = self.close_fn()
-        if isinstance(outcome, Awaitable):
-            await outcome
+        await self.close_fn()
 
 
 def _remember(runtime: BridgeRuntime, payload: bytes, *, inbound: bool) -> None:
