@@ -9,6 +9,7 @@ with the configured request-response policy.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 import socket
 import ssl
@@ -19,7 +20,7 @@ from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TypeVar
+from typing import TypeVar, cast
 
 import aiohttp
 from aiohttp import WSMsgType, web
@@ -60,6 +61,20 @@ _HOP_HEADERS = {
     "upgrade",
 }
 _SENSITIVE_HEADERS = {"authorization", "cookie", "proxy-authorization", "set-cookie"}
+_RUNNER_TAKES_SHUTDOWN = "shutdown_timeout" in inspect.signature(web.BaseRunner.__init__).parameters
+
+
+def _as_datagram(transport: asyncio.BaseTransport) -> asyncio.DatagramTransport | None:
+    """Return a datagram transport, including Python 3.11's selector socket.
+
+    Python 3.11's ``_SelectorDatagramTransport`` implements ``sendto`` but
+    does not subclass ``asyncio.DatagramTransport``. 3.12 and later do.
+    """
+    if isinstance(transport, asyncio.DatagramTransport):
+        return transport
+    if callable(getattr(transport, "sendto", None)):
+        return cast("asyncio.DatagramTransport", transport)
+    return None
 
 
 class _Idle(Exception):
@@ -134,8 +149,9 @@ class _QueueProtocol(asyncio.DatagramProtocol):
         self._on_drop = on_drop
 
     def connection_made(self, transport: asyncio.BaseTransport) -> None:
-        if isinstance(transport, asyncio.DatagramTransport):
-            self.transport = transport
+        found = _as_datagram(transport)
+        if found is not None:
+            self.transport = found
 
     def datagram_received(self, data: bytes, addr: tuple[str | int, ...] | None) -> None:
         peer = _peer_addr(addr)
@@ -1235,19 +1251,32 @@ class Gateway:
             app.router.add_get(spec.input.path, self._bind_ws(runtime))
         else:
             app.router.add_route("*", spec.input.path, self._bind_http(runtime))
-        runner = web.AppRunner(app)
+        timeout = self.config.server.shutdown_timeout_seconds
+        if _RUNNER_TAKES_SHUTDOWN:
+            runner = web.AppRunner(app, shutdown_timeout=timeout)
+        else:
+            runner = web.AppRunner(app)
         await runner.setup()
         runtime.runner = runner
         tls = spec.input.tls
         ssl_ctx = server_context(tls) if tls is not None and tls.enabled else None
-        site = web.TCPSite(
-            runner,
-            spec.input.host,
-            _port(spec.input),
-            ssl_context=ssl_ctx,
-            reuse_address=False,
-            shutdown_timeout=self.config.server.shutdown_timeout_seconds,
-        )
+        if _RUNNER_TAKES_SHUTDOWN:
+            site = web.TCPSite(
+                runner,
+                spec.input.host,
+                _port(spec.input),
+                ssl_context=ssl_ctx,
+                reuse_address=False,
+            )
+        else:
+            site = web.TCPSite(
+                runner,
+                spec.input.host,
+                _port(spec.input),
+                ssl_context=ssl_ctx,
+                reuse_address=False,
+                shutdown_timeout=timeout,
+            )
         await site.start()
         names = runner.addresses
         if not names:
@@ -1628,10 +1657,11 @@ class Gateway:
                 ),
                 runtime.spec.limits.connect_timeout_seconds,
             )
-            if not isinstance(transport, asyncio.DatagramTransport):
+            opened = _as_datagram(transport)
+            if opened is None:
                 transport.close()
                 raise SwitchboardError("The UDP output did not open.")
-            return transport
+            return opened
 
         opened = await self._retry(runtime, connect)
         self._transports.add(opened)
@@ -2343,8 +2373,9 @@ class Gateway:
         except (ConnectionError, OSError, TimeoutError) as exc:
             raise DeliveryError("delivery failed", retry="safe") from exc
         try:
-            if isinstance(transport, asyncio.DatagramTransport):
-                transport.sendto(payload)
+            opened = _as_datagram(transport)
+            if opened is not None:
+                opened.sendto(payload)
         finally:
             transport.close()
 

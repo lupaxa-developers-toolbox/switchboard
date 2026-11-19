@@ -10,7 +10,7 @@ import pytest
 
 from lupaxa.switchboard.config import load_config
 from lupaxa.switchboard.exceptions import SwitchboardError
-from lupaxa.switchboard.gateway import Gateway
+from lupaxa.switchboard.gateway import Gateway, _as_datagram
 
 SECRET = b"SECRET-PAYLOAD-VALUE"
 
@@ -312,19 +312,20 @@ async def _tcp_server(handler) -> tuple[asyncio.Server, int]:
 async def _udp_echo() -> tuple[asyncio.DatagramTransport, int]:
     class _Echo(asyncio.DatagramProtocol):
         def connection_made(self, transport: asyncio.BaseTransport) -> None:
-            self.transport = transport
+            self.transport = _as_datagram(transport)
 
         def datagram_received(self, data: bytes, addr: tuple[str | int, ...] | None) -> None:
-            if isinstance(self.transport, asyncio.DatagramTransport) and addr is not None:
+            if self.transport is not None and addr is not None:
                 self.transport.sendto(data, addr)
 
     transport, _protocol = await asyncio.get_running_loop().create_datagram_endpoint(
         _Echo,
         local_addr=("127.0.0.1", 0),
     )
-    if not isinstance(transport, asyncio.DatagramTransport):
+    opened = _as_datagram(transport)
+    if opened is None:
         raise RuntimeError("expected a datagram transport")
-    return transport, int(transport.get_extra_info("sockname")[1])
+    return opened, int(opened.get_extra_info("sockname")[1])
 
 
 async def _gateway(
